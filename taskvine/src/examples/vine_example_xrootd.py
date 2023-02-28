@@ -65,11 +65,11 @@ if __name__ == "__main__":
     # if not give, taskvine will try to find one in the default places
     # (X509_USER_PROXY, or /tmp/x509up_uUID)
     proxy_file = None
-    # proxy_file = vine.vine_file_local("myproxy.pem")
+    # proxy_file = vine.declare_file("myproxy.pem")
 
     for root_file in root_files:
         t = vine.PythonTask(count_events, "myroot.file")
-        t.add_input(vine.FileXrootD(root_file, proxy_file), "myroot.file", cache=True)
+        t.add_input(m.declare_xrootd(root_file, proxy_file), "myroot.file", cache=True)
         t.set_environment(env_with_xrootd)
 
         task_id = m.submit(t)
@@ -79,9 +79,11 @@ if __name__ == "__main__":
     while not m.empty():
         t = m.wait(5)
         if t:
-            if t.result == vine.VINE_RESULT_SUCCESS:
+            if t.successful():
                 print(f"task {t.id} processed a file with {t.output} events")
+            elif t.completed():
+                print(f"task {t.id} completed with an executin error, exit code {t.exit_code}")
             else:
-                print(f"task {t.id} failed: {t.result_string}")
+                print(f"task {t.id} failed with status {t.result_string}")
 
     print("all tasks complete!")
