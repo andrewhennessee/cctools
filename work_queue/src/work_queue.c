@@ -1602,20 +1602,20 @@ char *make_cached_name( const struct work_queue_file *f )
 	switch(f->type) {
 		case WORK_QUEUE_FILE:
 		case WORK_QUEUE_DIRECTORY:
-			return string_format("file-%d-%s-%s", cache_file_id, md5_string(digest), payload_enc);
+			return string_format("file-%d-%s-%s", cache_file_id, md5_to_string(digest), payload_enc);
 			break;
 		case WORK_QUEUE_FILE_PIECE:
-			return string_format("piece-%d-%s-%s-%lld-%lld",cache_file_id, md5_string(digest),payload_enc,(long long)f->offset,(long long)f->piece_length);
+			return string_format("piece-%d-%s-%s-%lld-%lld",cache_file_id, md5_to_string(digest),payload_enc,(long long)f->offset,(long long)f->piece_length);
 			break;
 		case WORK_QUEUE_REMOTECMD:
-			return string_format("cmd-%d-%s", cache_file_id, md5_string(digest));
+			return string_format("cmd-%d-%s", cache_file_id, md5_to_string(digest));
 			break;
 		case WORK_QUEUE_URL:
-			return string_format("url-%d-%s", cache_file_id, md5_string(digest));
+			return string_format("url-%d-%s", cache_file_id, md5_to_string(digest));
 			break;
 		case WORK_QUEUE_BUFFER:
 		default:
-			return string_format("buffer-%d-%s", cache_file_id, md5_string(digest));
+			return string_format("buffer-%d-%s", cache_file_id, md5_to_string(digest));
 			break;
 	}
 }
@@ -7809,7 +7809,7 @@ static void write_transaction_category(struct work_queue *q, struct category *c)
 	buffer_init(&B);
 
 	buffer_printf(&B, "CATEGORY %s MAX ", c->name);
-	rmsummary_print_buffer(&B, category_dynamic_task_max_resources(c, NULL, CATEGORY_ALLOCATION_MAX), 1);
+	rmsummary_print_buffer(&B, category_bucketing_dynamic_task_max_resources(c, NULL, CATEGORY_ALLOCATION_MAX, -1), 1);
 	write_transaction(q, buffer_tostring(&B));
 	buffer_rewind(&B, 0);
 
@@ -7843,7 +7843,7 @@ static void write_transaction_category(struct work_queue *q, struct category *c)
 	}
 
 	buffer_printf(&B, "CATEGORY %s FIRST %s ", c->name, mode);
-	rmsummary_print_buffer(&B, category_dynamic_task_max_resources(c, NULL, CATEGORY_ALLOCATION_FIRST), 1);
+	rmsummary_print_buffer(&B, category_bucketing_dynamic_task_max_resources(c, NULL, CATEGORY_ALLOCATION_FIRST, -1), 1);
 	write_transaction(q, buffer_tostring(&B));
 
 	buffer_free(&B);
@@ -8000,6 +8000,7 @@ void work_queue_accumulate_task(struct work_queue *q, struct work_queue_task *t)
 		}
 	}
 
+	int success;	//1 if success, 0 if resource exhaustion, -1 if other errors
 	/* accumulate resource summary to category only if task result makes it meaningful. */
 	switch(t->result) {
 		case WORK_QUEUE_RESULT_SUCCESS:
@@ -8008,7 +8009,16 @@ void work_queue_accumulate_task(struct work_queue *q, struct work_queue_task *t)
 		case WORK_QUEUE_RESULT_TASK_MAX_RUN_TIME:
 		case WORK_QUEUE_RESULT_DISK_ALLOC_FULL:
 		case WORK_QUEUE_RESULT_OUTPUT_TRANSFER_ERROR:
-			if(category_accumulate_summary(c, t->resources_measured, q->current_max_worker)) {
+			if (t->result == WORK_QUEUE_RESULT_SUCCESS) {
+				success = 1;
+			}
+			else if (t->result == WORK_QUEUE_RESULT_RESOURCE_EXHAUSTION) {
+				success = 0;
+			}
+			else {
+				success = -1;
+			}
+			if(category_bucketing_accumulate_summary(c, t->resources_measured, q->current_max_worker, t->taskid, success)) {
 				write_transaction_category(q, c);
 			}
 			break;
@@ -8089,7 +8099,7 @@ const struct rmsummary *task_max_resources(struct work_queue *q, struct work_que
 
 	struct category *c = work_queue_category_lookup_or_create(q, t->category);
 
-	return category_dynamic_task_max_resources(c, t->resources_requested, t->resource_request);
+	return category_bucketing_dynamic_task_max_resources(c, t->resources_requested, t->resource_request, t->taskid);
 }
 
 const struct rmsummary *task_min_resources(struct work_queue *q, struct work_queue_task *t) {

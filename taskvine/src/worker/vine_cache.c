@@ -4,11 +4,13 @@ This software is distributed under the GNU General Public License.
 See the file COPYING for details.
 */
 
+#include "vine_worker.h"
 #include "vine_cache.h"
 #include "vine_process.h"
 
 #include "vine_transfer.h"
 #include "vine_protocol.h"
+
 #include "xxmalloc.h"
 #include "hash_table.h"
 #include "debug.h"
@@ -22,6 +24,7 @@ See the file COPYING for details.
 #include <sys/types.h>
 #include <sys/fcntl.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -71,9 +74,57 @@ struct vine_cache * vine_cache_create( const char *cache_dir )
 }
 
 /*
-Delete the cache manager structure, though not the underlying files.
+Load existing cache directory into cache structure.
+*/
+void vine_cache_load(struct vine_cache *c)
+{
+	DIR *dir = opendir(c->cache_dir);
+	if(dir){
+		debug(D_VINE, "loading cache at: %s", c->cache_dir);
+		struct dirent *d;
+		while((d=readdir(dir))){
+			if(!strcmp(d->d_name,".")) continue;
+			if(!strcmp(d->d_name,"..")) continue;
+
+			debug(D_VINE, "found %s in cache",d->d_name);
+
+			struct stat info;
+			int64_t nbytes, nfiles;
+			char *cache_path = vine_cache_full_path(c,d->d_name);
+
+			if(stat(cache_path, &info)==0){
+				if(S_ISREG(info.st_mode)){
+					vine_cache_addfile(c, info.st_size, info.st_mode, d->d_name);
+				} else if(S_ISDIR(info.st_mode)){
+                			path_disk_size_info_get(cache_path,&nbytes,&nfiles); 
+					vine_cache_addfile(c, nbytes, info.st_mode, d->d_name);
+				}
+			} else {
+				debug(D_VINE,"could not stat: %s in cache: %s error %s", d->d_name, c->cache_dir, strerror(errno));
+			}
+			free(cache_path);	
+		}
+	}
+	closedir(dir);
+}
+
+/*
+send cache updates to manager from existing cache_directory 
 */
 
+void vine_cache_scan(struct vine_cache *c, struct link *manager)
+{
+	struct cache_file *f;
+	char * cachename;
+	HASH_TABLE_ITERATE(c->table, cachename, f){
+		/* XXX the worker doesn't know how long it took to transfer. */
+		vine_worker_send_cache_update(manager,cachename,f->actual_size,0);
+	}
+}
+
+/*
+Delete the cache manager structure, though not the underlying files.
+*/
 void vine_cache_delete( struct vine_cache *c )
 {
 	hash_table_clear(c->table,(void*)cache_file_delete);
@@ -119,7 +170,7 @@ Queue a remote file transfer to produce a file.
 This entry will be materialized later in vine_cache_ensure.
 */
 
-int vine_cache_queue_transfer( struct vine_cache *c, const char *source, const char *cachename, int64_t size, int mode, vine_file_flags_t flags )
+int vine_cache_queue_transfer( struct vine_cache *c, const char *source, const char *cachename, int64_t size, int mode )
 {
 	struct cache_file *f = cache_file_create(VINE_CACHE_TRANSFER,source,size,mode,0);
 	hash_table_insert(c->table,cachename,f);
@@ -131,7 +182,7 @@ Queue a mini-task to produce a file.
 This entry will be materialized later in vine_cache_ensure.
 */
 
-int vine_cache_queue_command( struct vine_cache *c, struct vine_task *mini_task, const char *cachename, int64_t size, int mode, vine_file_flags_t flags )
+int vine_cache_queue_command( struct vine_cache *c, struct vine_task *mini_task, const char *cachename, int64_t size, int mode )
 {
 	struct cache_file *f = cache_file_create(VINE_CACHE_MINI_TASK,"task",size,mode,mini_task);
 	hash_table_insert(c->table,cachename,f);
@@ -317,10 +368,7 @@ It is a little odd that the manager link is passed as an argument here,
 but it is needed in order to send back the necessary update/invalid messages.
 */
 
-int send_cache_update( struct link *manager, const char *cachename, int64_t size, timestamp_t transfer_time );
-int send_cache_invalid( struct link *manager, const char *cachename, const char *message );
-
-int vine_cache_ensure( struct vine_cache *c, const char *cachename, struct link *manager, vine_file_flags_t flags )
+int vine_cache_ensure( struct vine_cache *c, const char *cachename, struct link *manager )
 {
 	if(!strcmp(cachename,"0")) return 1;
 
@@ -331,7 +379,7 @@ int vine_cache_ensure( struct vine_cache *c, const char *cachename, struct link 
 	}
 
 	if(f->complete) {
-		debug(D_VINE,"cache: %s is already present.",cachename);
+		/* File is already present in the cache. */
 		return 1;
 	}
 
@@ -377,7 +425,7 @@ int vine_cache_ensure( struct vine_cache *c, const char *cachename, struct link 
 			f->actual_size = nbytes;
 			f->complete = 1;
 			debug(D_VINE,"cache: created %s with size %lld in %lld usec",cachename,(long long)f->actual_size,(long long)transfer_time);
-			send_cache_update(manager,cachename,f->actual_size,transfer_time);
+			vine_worker_send_cache_update(manager,cachename,f->actual_size,transfer_time);
 			result = 1;
 		} else {
 			debug(D_VINE,"cache: command succeeded but did not create %s",cachename);
@@ -397,7 +445,7 @@ int vine_cache_ensure( struct vine_cache *c, const char *cachename, struct link 
 	
 	if(!result) {
 		if(!error_message) error_message = strdup("unknown");
-		send_cache_invalid(manager,cachename,error_message);
+		vine_worker_send_cache_invalid(manager,cachename,error_message);
 		vine_cache_remove(c,cachename);
 	}
 	

@@ -12,6 +12,8 @@ See the file COPYING for details.
 #include "vine_watcher.h"
 #include "vine_gpus.h"
 #include "vine_file.h"
+#include "vine_mount.h"
+#include "vine_cache.h"
 #include "vine_coprocess.h"
 #include "vine_sandbox.h"
 #include "vine_transfer.h"
@@ -119,7 +121,7 @@ static int sigchld_received_flag = 0;
 char *password = 0;
 
 // Allow worker to use symlinks when link() fails.  Enabled by default.
-int symlinks_enabled = 1;
+int vine_worker_symlinks_enabled = 1;
 
 // Worker id. A unique id for this worker instance.
 static char *worker_id;
@@ -416,17 +418,14 @@ static int send_keepalive(struct link *manager, int force_resources)
 Send an asynchronmous message to the manager indicating that an item was successfully loaded into the cache, along with its size in bytes and transfer time in usec.
 */
 
-void send_cache_update( struct link *manager, const char *cachename, int64_t size, timestamp_t transfer_time )
+void vine_worker_send_cache_update( struct link *manager, const char *cachename, int64_t size, timestamp_t transfer_time )
 {
-	char *transfer_id;
-	if((transfer_id = hash_table_lookup(current_transfers, cachename))){
+	char *transfer_id = hash_table_remove(current_transfers, cachename);
+	if(transfer_id) {
 		send_message(manager,"cache-update %s %lld %lld %s\n",cachename,(long long)size,(long long)transfer_time, transfer_id);
+		free(transfer_id);
 	} else {
 		send_message(manager,"cache-update %s %lld %lld X\n",cachename,(long long)size,(long long)transfer_time);
-	}
-	if(transfer_id)
-	{
-		hash_table_remove(current_transfers, cachename);
 	}
 }
 
@@ -434,26 +433,32 @@ void send_cache_update( struct link *manager, const char *cachename, int64_t siz
 Send an asynchronous message to the manager indicating that an item previously queued in the cache is invalid because it could not be loaded.  Accompanied by a corresponding error message.
 */
 
-void send_cache_invalid( struct link *manager, const char *cachename, const char *message )
+void vine_worker_send_cache_invalid( struct link *manager, const char *cachename, const char *message )
 {
-	char *transfer_id;
 	int length = strlen(message);
-	if((transfer_id = hash_table_lookup(current_transfers, cachename))){
+	char *transfer_id = hash_table_remove(current_transfers, cachename);
+	if(transfer_id) {
 		debug(D_VINE, "Sending Cache invalid transfer id: %s", transfer_id);
 		send_message(manager,"cache-invalid %s %d %s\n",cachename, length, transfer_id);
-	}else{
+		free(transfer_id);
+	} else {
 		send_message(manager,"cache-invalid %s %d\n",cachename,length);
 	}
 	link_write(manager,message,length,time(0)+active_timeout);
 }
 
-void send_transfer_address( struct link *manager )
+/*
+Send an asynchronous message to the manager indicating where the worker is listening for transfers.
+*/
+
+static void send_transfer_address( struct link *manager )
 {
 	char addr[LINK_ADDRESS_MAX];
 	int port;
 	vine_transfer_server_address(addr,&port);
 	send_message(manager, "transfer-address %s %d\n",addr,port);
 }
+
 
 /*
 Send the initial "ready" message to the manager with the version and so forth.
@@ -466,12 +471,17 @@ static void report_worker_ready( struct link *manager )
 	domain_name_cache_guess(hostname);
 	send_message(manager,"taskvine %d %s %s %s %d.%d.%d\n",VINE_PROTOCOL_VERSION,hostname,os_name,arch_name,CCTOOLS_VERSION_MAJOR,CCTOOLS_VERSION_MINOR,CCTOOLS_VERSION_MICRO);
 	send_message(manager, "info worker-id %s\n", worker_id);
+	vine_cache_scan(global_cache, manager);
+
 	send_features(manager);
-	send_keepalive(manager, 1);
 	send_transfer_address(manager);
 	send_message(manager, "info worker-end-time %" PRId64 "\n", (int64_t) DIV_INT_ROUND_UP(end_time, USECOND));
-	if (factory_name)
+
+	if (factory_name) {
 		send_message(manager, "info from-factory %s\n", factory_name);
+	}
+
+	send_keepalive(manager, 1);
 }
 
 /*
@@ -570,7 +580,7 @@ static void report_task_complete( struct link *manager, struct vine_process *p )
 	fstat(p->output_fd, &st);
 	output_length = st.st_size;
 	lseek(p->output_fd, 0, SEEK_SET);
-	send_message(manager, "result %d %d %lld %llu %d\n", p->result, p->exit_code, (long long) output_length, (unsigned long long) p->execution_end-p->execution_start, p->task->task_id);
+	send_message(manager, "result %d %d %lld %llu %llu %d\n", p->result, p->exit_code, (long long) output_length, (unsigned long long) p->execution_start, (unsigned long long) p->execution_end, p->task->task_id);
 	link_stream_from_fd(manager, p->output_fd, output_length, time(0)+active_timeout);
 
 	total_task_execution_time += (p->execution_end - p->execution_start);
@@ -788,26 +798,26 @@ static int do_task( struct link *manager, int task_id, time_t stoptime )
 Accept a url specification and queue it for later transfer.
 */
 
-static int do_put_url( const char *cache_name, int64_t size, int mode, const char *source, vine_file_flags_t flags )
+static int do_put_url( const char *cache_name, int64_t size, int mode, const char *source )
 {
-	return vine_cache_queue_transfer(global_cache,source,cache_name,size,mode,flags);
+	return vine_cache_queue_transfer(global_cache,source,cache_name,size,mode);
 }
 
 /*
 Accept a mini_task that is executed on demand to produce a specific file.
 */
 
-static int do_put_mini_task( struct link *manager, time_t stoptime, const char *cache_name, int64_t size, int mode, const char *source, vine_file_flags_t flags )
+static int do_put_mini_task( struct link *manager, time_t stoptime, const char *cache_name, int64_t size, int mode, const char *source )
 {
 	struct vine_task *mini_task = do_task_body(manager,0,stoptime);
 	if(!mini_task) return 0;
 
 	/* XXX hacky hack -- the single output of the task must have the target cachename */
-	struct vine_file *output_file = list_peek_head(mini_task->output_files);
-	free(output_file->cached_name);
-	output_file->cached_name = strdup(cache_name);
+	struct vine_mount *output_mount = list_peek_head(mini_task->output_mounts);
+	free(output_mount->file->cached_name);
+	output_mount->file->cached_name = strdup(cache_name);
 	
-	return vine_cache_queue_command(global_cache,mini_task,cache_name,size,mode,flags);
+	return vine_cache_queue_command(global_cache,mini_task,cache_name,size,mode);
 }
 
 /*
@@ -853,13 +863,17 @@ static int do_kill(int task_id)
 	}
 
 	if(itable_remove(procs_running, p->pid)) {
-		vine_process_kill(p);
-		if (!p->coprocess || vine_process_get_duty_name(p)) {
-			cores_allocated -= p->task->resources_requested->cores;
-			memory_allocated -= p->task->resources_requested->memory;
-			disk_allocated -= p->task->resources_requested->disk;
-			gpus_allocated -= p->task->resources_requested->gpus;
+		if (p->coprocess) {
+			hash_table_remove(features, p->coprocess->name);
+			list_remove(coprocess_list, p->coprocess);
+			list_remove(duty_list, p->coprocess->name);
+			hash_table_remove(duty_ids, p->coprocess->name);			
 		}
+		vine_process_kill(p);
+		cores_allocated -= p->task->resources_requested->cores;
+		memory_allocated -= p->task->resources_requested->memory;
+		disk_allocated -= p->task->resources_requested->disk;
+		gpus_allocated -= p->task->resources_requested->gpus;
 		vine_gpus_free(task_id);
 	}
 
@@ -1028,7 +1042,6 @@ static int handle_manager(struct link *manager)
 	char transfer_id[VINE_LINE_MAX];
 	int64_t length;
 	int64_t task_id = 0;
-	int flags;
 	int mode, r, n;
 
 	if(recv_message(manager, line, sizeof(line), idle_stoptime )) {
@@ -1042,16 +1055,16 @@ static int handle_manager(struct link *manager)
 			url_decode(filename_encoded,filename,sizeof(filename));
 			r = vine_transfer_get_dir(manager,global_cache,filename,time(0)+active_timeout);
 			reset_idle_timer();
-		} else if(sscanf(line, "puturl %s %s %" SCNd64 " %o %d %s", source_encoded, filename_encoded, &length, &mode, &flags, transfer_id)==6) {
+		} else if(sscanf(line, "puturl %s %s %" SCNd64 " %o %s", source_encoded, filename_encoded, &length, &mode, transfer_id)==5) {
 			url_decode(filename_encoded,filename,sizeof(filename));
 			url_decode(source_encoded,source,sizeof(source));
-			r = do_put_url(filename,length,mode,source,flags);
+			r = do_put_url(filename,length,mode,source);
 			reset_idle_timer();
 			hash_table_insert(current_transfers, strdup(filename), strdup(transfer_id));
 			debug(D_VINE, "Insert ID-File pair into transfer table : %s :: %s", filename, transfer_id);
-		} else if(sscanf(line, "mini_task %"SCNd64" %s %"SCNd64" %o %d",&task_id,filename_encoded, &length, &mode, &flags)==5) {
+		} else if(sscanf(line, "mini_task %"SCNd64" %s %"SCNd64" %o",&task_id,filename_encoded, &length, &mode)==4) {
 			url_decode(filename_encoded,filename,sizeof(filename));
-			r = do_put_mini_task(manager,time(0)+active_timeout,filename,length,mode,source,flags);
+			r = do_put_mini_task(manager,time(0)+active_timeout,filename,length,mode,source);
 			reset_idle_timer();
 		} else if(sscanf(line, "unlink %s", filename_encoded) == 1) {
 			url_decode(filename_encoded,filename,sizeof(filename));
@@ -1078,6 +1091,7 @@ static int handle_manager(struct link *manager)
 			kill(((struct vine_process *)itable_lookup(procs_table, task_id))->pid, SIGKILL);
 			list_remove(duty_list, duty_name);
 			hash_table_remove(features, duty_name);
+			hash_table_remove(duty_ids, duty_name);
 			list_remove(coprocess_list, ((struct vine_process *)itable_lookup(procs_table, task_id))->coprocess);
 			r = do_kill(task_id);
 		} else if(!strncmp(line, "release", 8)) {
@@ -1442,9 +1456,17 @@ The workspace consists of the following directories:
 static int workspace_prepare()
 {
 	debug(D_VINE,"preparing workspace %s",workspace);
-
+	
 	char *cachedir = string_format("%s/cache",workspace);
-	int result = create_dir(cachedir,0777);
+	struct stat info;
+	int result;
+	if(!(stat(cachedir, &info)==0 && S_ISDIR(info.st_mode))){  
+			result = create_dir(cachedir,0777);
+	}
+	else{
+			result = 1;
+			debug(D_VINE,"cache directory already exists!");
+	}
 	global_cache = vine_cache_create(cachedir);
 	free(cachedir);
 
@@ -1481,6 +1503,7 @@ static void workspace_cleanup()
 			if(!strcmp(d->d_name,".")) continue;
 			if(!strcmp(d->d_name,"..")) continue;
 			if(!strcmp(d->d_name,"trash")) continue;
+			if(!strcmp(d->d_name,"cache")) continue;
 			trash_file(d->d_name);
 		}
 		closedir(dir);
@@ -1518,7 +1541,6 @@ static void workspace_delete()
 	*/
 
 	unlink_recursive(workspace);
-
 	free(workspace);
 }
 
@@ -1596,10 +1618,12 @@ static int serve_manager_by_hostport( const char *host, int port, const char *ve
 	}
 
 	workspace_prepare();
+	vine_cache_load(global_cache);
 
 	measure_worker_resources();
 
 	report_worker_ready(manager);
+
 	work_for_manager(manager);
 
 	if(abort_signal_received) {
@@ -1766,7 +1790,7 @@ void set_worker_id()
 	unsigned char digest[MD5_DIGEST_LENGTH];
 
 	md5_buffer(salt_and_pepper, strlen(salt_and_pepper), digest);
-	worker_id = string_format("worker-%s", md5_string(digest));
+	worker_id = string_format("worker-%s", md5_to_string(digest));
 
 	free(salt_and_pepper);
 }
@@ -2081,7 +2105,7 @@ int main(int argc, char *argv[])
 			}
 			break;
 		case LONG_OPT_DISABLE_SYMLINKS:
-			symlinks_enabled = 0;
+			vine_worker_symlinks_enabled = 0;
 			break;
 		case LONG_OPT_SINGLE_SHOT:
 			single_shot_mode = 1;
@@ -2164,7 +2188,10 @@ int main(int argc, char *argv[])
 	setenv("VINE_SANDBOX", workspace, 0);
 
 	// change to workspace
+	
 	chdir(workspace);
+
+	unlink_recursive("cache");
 
 	procs_running  = itable_create(0);
 	procs_table    = itable_create(0);
@@ -2253,6 +2280,9 @@ int main(int argc, char *argv[])
 		vine_coprocess_shutdown_all_coprocesses(coprocess_list);
 		list_delete(coprocess_list);
 	}
+	
+	trash_file("cache");
+	trash_empty();
 
 	workspace_delete();
 

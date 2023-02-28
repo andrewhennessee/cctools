@@ -33,8 +33,8 @@ struct vine_task {
 	char *monitor_output_directory;	/**< Custom output directory for the monitoring output files. If NULL, save to directory from @ref vine_enable_monitoring */
 	char *monitor_snapshot_file;    /**< Filename the monitor checks to produce snapshots. */
 
-	struct list *input_files;    /**< The files to transfer to the worker and place in the executing directory. */
-	struct list *output_files;   /**< The output files (other than the standard output stream) created by the program to be retrieved from the task. */
+	struct list *input_mounts;    /**< The mounted files expected as inputs. */
+	struct list *output_mounts;   /**< The mounted files expected as outputs. */
 	struct list *env_list;       /**< Environment variables applied to the task. */
 	struct list *feature_list;   /**< User-defined features this task requires. (See vine_worker's --feature option.) */
 
@@ -72,6 +72,9 @@ struct vine_task {
 
 	timestamp_t time_when_retrieval;    /**< The time when output files start to be transfered back to the manager. time_done - time_when_retrieval is the time taken to transfer output files. */
 
+    timestamp_t time_workers_execute_last_start;           /**< The time when the last complete execution for this task started at a worker. */
+    timestamp_t time_workers_execute_last_end;             /**< The time when the last complete execution for this task ended at a worker. */
+
 	timestamp_t time_workers_execute_last;                 /**< Duration of the last complete execution for this task. */
 	timestamp_t time_workers_execute_all;                  /**< Accumulated time for executing the command on any worker, regardless of whether the task completed (i.e., this includes time running on workers that disconnected). */
 	timestamp_t time_workers_execute_exhaustion;           /**< Accumulated time spent in attempts that exhausted resources. */
@@ -94,5 +97,6 @@ void vine_task_check_consistency( struct vine_task *t );
 const char *vine_task_state_to_string( vine_task_state_t task_state );
 
 struct jx * vine_task_to_jx( struct vine_manager *q, struct vine_task *t );
+char * vine_task_to_json(struct vine_task *t);
 
 #endif
