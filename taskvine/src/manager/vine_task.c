@@ -356,11 +356,6 @@ void vine_task_set_category(struct vine_task *t, const char *category)
 	t->category = xxstrdup(category ? category : "default");
 }
 
-char * vine_task_get_category(struct vine_task *t)
-{
-	return t->category;
-}
-
 void vine_task_add_feature(struct vine_task *t, const char *name)
 {
 	if(!name) {

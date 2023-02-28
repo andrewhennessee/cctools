@@ -422,11 +422,6 @@ have similar resources requirements (e.g. to disconnect slow workers).
 */
 void vine_task_set_category(struct vine_task *t, const char *category);
 
-/** Retrieve the category of a task.
-@param t A task object.
-*/
-char * vine_task_get_category(struct vine_task *t);
-
 /** Label the task with a user-defined feature. The task will only run on a worker that provides (--feature option) such feature.
 @param t A task object.
 @param name The name of the feature.
