@@ -16,41 +16,41 @@ class StatusDisplay:
     def active(self):
         raise NotImplementedError
 
-    def update(self, queue=None, force=False):
+    def update(self, manager=None, force=False):
         now = time.time()
         if not force:
             if self._last_update_report + self.interval > now:
                 return
         self._last_update_report = now
 
-        (q_info, rw_info, rc_info, app_info) = self.generate_table_data(queue)
+        (q_info, rw_info, rc_info, app_info) = self.generate_table_data(manager)
         self.update_display(q_info, rw_info, rc_info, app_info)
 
-    def update_display(self, queue_info, resources_worker_info, resources_category_info, app_info):
+    def update_display(self, manager_info, resources_worker_info, resources_category_info, app_info):
         raise NotImplementedError
 
-    def generate_table_data(self, queue=None):
-        queue_s = None
+    def generate_table_data(self, manager=None):
+        manager_s = None
         app_s = None
-        if queue:
+        if manager:
             try:
-                queue_s = queue.status("queue")[0]
+                manager_s = manager.status("manager")[0]
             except Exception as e:
-                print("Error reading work queue status: {}".format(e), file=sys.stderr)
+                print("Error reading taskvine status: {}".format(e), file=sys.stderr)
             try:
-                app_s = queue.application_info()
+                app_s = manager.application_info()
             except Exception as e:
                 print("Error reading application information status: {}".format(e), file=sys.stderr)
 
-        rc_info = self.generate_resource_category_tables(queue_s)
-        rw_info = self.generate_resource_worker_tables(queue_s)
-        q_info = self.generate_queue_table(queue_s)
+        rc_info = self.generate_resource_category_tables(manager_s)
+        rw_info = self.generate_resource_worker_tables(manager_s)
+        q_info = self.generate_manager_table(manager_s)
         app_info = self.generate_app_table(app_s)
 
         return (q_info, rw_info, rc_info, app_info)
 
-    def generate_resource_worker_tables(self, queue_s):
-        if not queue_s:
+    def generate_resource_worker_tables(self, manager_s):
+        if not manager_s:
             return None
 
         suffixes = [("largest", "largest worker"), ("inuse", "allocated"), ("total", "total")]
@@ -60,19 +60,19 @@ class StatusDisplay:
         rs.append(header)
 
         for s, l in suffixes:
-            d = self._dict_from_q(queue_s, s)
+            d = self._dict_from_q(manager_s, s)
             rs.append(self.resources_to_row(d, l, "na"))
 
         return [rs]
 
-    def generate_resource_category_tables(self, queue_s):
-        if not queue_s:
+    def generate_resource_category_tables(self, manager_s):
+        if not manager_s:
             return None
 
-        categories = queue_s["categories"]
+        categories = manager_s["categories"]
         largest_worker = None
-        if queue_s["workers_connected"] > 0:
-            largest_worker = self._dict_from_q(queue_s, "largest")
+        if manager_s["workers_connected"] > 0:
+            largest_worker = self._dict_from_q(manager_s, "largest")
 
         categories.sort(key=lambda c: c["category"])
         cs = []
@@ -104,8 +104,8 @@ class StatusDisplay:
 
         return cs
 
-    def generate_queue_table(self, queue_s):
-        if not queue_s:
+    def generate_manager_table(self, manager_s):
+        if not manager_s:
             return None
 
         stats = [
@@ -118,16 +118,16 @@ class StatusDisplay:
             "workers_busy",
         ]
 
-        pairs = list((key.replace("_", " "), str(queue_s[key])) for key in stats)
+        pairs = list((key.replace("_", " "), str(manager_s[key])) for key in stats)
 
-        pairs.append(("sent", self.with_units("disk", queue_s["bytes_sent"] / 1e6, "na")))
-        pairs.append(("received", self.with_units("disk", queue_s["bytes_received"] / 1e6, "na")))
+        pairs.append(("sent", self.with_units("disk", manager_s["bytes_sent"] / 1e6, "na")))
+        pairs.append(("received", self.with_units("disk", manager_s["bytes_received"] / 1e6, "na")))
 
-        pairs.append(("total send time", str(timedelta(seconds=math.ceil(queue_s["time_send"] / 1e6)))))
-        pairs.append(("total receive time", str(timedelta(seconds=math.ceil(queue_s["time_send"] / 1e6)))))
-        pairs.append(("total good task time", str(timedelta(seconds=math.ceil(queue_s["time_workers_execute_good"] / 1e6)))))
-        pairs.append(("total task time", str(timedelta(seconds=math.ceil(queue_s["time_workers_execute"] / 1e6)))))
-        pairs.append(("runtime", str(timedelta(seconds=math.ceil(time.time() - queue_s["time_when_started"] / 1e6)))))
+        pairs.append(("total send time", str(timedelta(seconds=math.ceil(manager_s["time_send"] / 1e6)))))
+        pairs.append(("total receive time", str(timedelta(seconds=math.ceil(manager_s["time_send"] / 1e6)))))
+        pairs.append(("total good task time", str(timedelta(seconds=math.ceil(manager_s["time_workers_execute_good"] / 1e6)))))
+        pairs.append(("total task time", str(timedelta(seconds=math.ceil(manager_s["time_workers_execute"] / 1e6)))))
+        pairs.append(("runtime", str(timedelta(seconds=math.ceil(time.time() - manager_s["time_when_started"] / 1e6)))))
 
         return pairs
 
@@ -211,8 +211,8 @@ class StatusDisplay:
             value /= 1000.0
         return f"{value:.2f} {m}"
 
-    def _dict_from_q(self, queue_s, suffix):
-        return {r: queue_s[f"{r}_{suffix}"] for r in StatusDisplay.resources}
+    def _dict_from_q(self, manager_s, suffix):
+        return {r: manager_s[f"{r}_{suffix}"] for r in StatusDisplay.resources}
 
 
 class JupyterDisplay(StatusDisplay):
@@ -267,13 +267,13 @@ class JupyterDisplay(StatusDisplay):
             import ipywidgets as ws
 
             if "IPKernelApp" in IPython.get_ipython().config:
-                self._queue_display = ws.HTML(value="")
+                self._manager_display = ws.HTML(value="")
                 self._app_display = ws.HTML(value="")
                 self._worker_display = ws.HTML(value="")
                 self._category_display = ws.HTML(value="")
 
                 self._output = ws.GridspecLayout(1, 8, grid_gap="20px")
-                self._output[0, :3] = ws.VBox([self._app_display, self._queue_display])
+                self._output[0, :3] = ws.VBox([self._app_display, self._manager_display])
                 self._output[0, 3:] = ws.VBox([self._worker_display, self._category_display])
                 IPython.display.display(self._output)
 
@@ -283,12 +283,12 @@ class JupyterDisplay(StatusDisplay):
     def active(self):
         return bool(self._output)
 
-    def update_display(self, queue_info, resources_worker_info, resources_category_info, app_info):
+    def update_display(self, manager_info, resources_worker_info, resources_category_info, app_info):
         if app_info:
             self._app_display.value = self.table_of_pairs(app_info, "application info")
 
-        if queue_info:
-            self._queue_display.value = self.table_of_pairs(queue_info, "queue stats")
+        if manager_info:
+            self._manager_display.value = self.table_of_pairs(manager_info, "manager stats")
 
         if resources_worker_info:
             self._worker_display.value = self.table_of_resources(resources_worker_info)

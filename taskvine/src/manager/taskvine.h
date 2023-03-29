@@ -25,8 +25,8 @@ no special capabilities.
 From the application perspective, the programmer creates a manager with @ref vine_create,
 defines a number of tasks with @ref vine_task_create, submits the tasks to the manager
 with @ref vine_submit, and then monitors completion with @ref vine_wait.
-Tasks are further described by attaching data objects via @ref vine_task_add_input_file,
-@ref vine_task_add_input_url and related functions.
+Tasks are further described by attaching data objects via @ref vine_task_add_input,
+@ref vine_task_add_ouput and related functions.
 
 The taskvine framework provides a large number of fault tolerance, resource management,
 and performance monitoring features that enable the construction of applications that
@@ -41,11 +41,19 @@ expected events.
 /** Select optional handling for input and output files: caching, unpacking, watching, etc. **/
 
 typedef enum {
-	VINE_NOCACHE  = 0, /**< Do not cache file at execution site. (default) */
-	VINE_CACHE    = 1, /**< Cache file at execution site for later use. */
-	VINE_WATCH    = 2, /**< Watch the output file and send back changes as the task runs. */
-	VINE_FAILURE_ONLY = 4,/**< Only return this output file if the task failed.  (Useful for returning large log files.) */
-	VINE_SUCCESS_ONLY = 8, /**< Only return this output file if the task succeeded. */
+	VINE_TRANSFER_ALWAYS = 0, /**< Always transfer this file when needed (only option for input files, see below for output files). */
+	VINE_WATCH = 1,           /**< Watch the output file and send back changes as the task runs. */
+	VINE_FAILURE_ONLY = 2,    /**< Only return this output file if the task failed.  (Useful for returning large log files.) */
+	VINE_SUCCESS_ONLY = 4,    /**< Only return this output file if the task succeeded. */
+} vine_mount_flags_t;
+
+// To see if file should be cached, used: (flags & VINE_CACHE). If it should
+// remain at workers after disconnection, use ((flags & VINE_CACHE_ALWAYS) == VINE_CACHE_ALWAYS)
+typedef enum {
+	VINE_CACHE_NEVER = 0,  /**< Do not cache file at execution site. (default) */
+	VINE_CACHE = 1,        /**< File remains in cache until workflow ends. */
+	VINE_CACHE_ALWAYS = 3, /**< File remains in cache until the worker teminates. **/
+	VINE_PEER_NOSHARE = 4  /**< Schedule this file to be shared between peers where available. See @vine_enable_peer_transfers **/
 } vine_file_flags_t;
 
 /** Select overall scheduling algorithm for matching tasks to workers. */
@@ -219,8 +227,8 @@ struct vine_stats {
 //@{
 
 /** Create a new task object.
-Once created and elaborated with functions such as @ref vine_task_add_input_file
-and @ref vine_task_add_input_buffer, the task should be passed to @ref vine_submit.
+Once created and elaborated with functions such as @ref vine_task_add_input
+and @ref vine_task_add_output, the task should be passed to @ref vine_submit.
 @param full_command The shell command line or coprocess functions to be
 executed by the task.  If null, the command will be given later by @ref
 vine_task_set_command
@@ -254,88 +262,24 @@ will only be sent to workers running the coprocess.
 */
 void vine_task_set_coprocess( struct vine_task *t, const char *name );
 
-/** Attach an input file or directory to a task.
-@param t A task object.
-@param local_name The name of the file/directory in the manager's filesystem.  May be any relative or absolute path name.
-@param remote_name The name that the file/directory will be given in the task sandbox.  Must be a relative path name: it may not begin with a slash.
-@param flags	May be zero or more of the following @ref vine_file_flags_t logical-ored together:
-- @ref VINE_CACHE indicates that the file/directory should be cached for later tasks. (recommended)
-- @ref VINE_NOCACHE indicates that the file should not be cached.
-*/
-void vine_task_add_input_file(struct vine_task *t, const char *local_name, const char *remote_name, vine_file_flags_t flags);
-
-/** Attach an output file or directory to a task.
-@param t A task object.
-@param local_name The name of the file/directory in the manager's filesystem.  May be any relative or absolute path name.
-@param remote_name The name that the file/directory will be given in the task sandbox.  Must be a relative path name: it may not begin with a slash.
-@param flags    May be zero or more of the following @ref vine_file_flags_t logical-ored together:
-- @ref VINE_CACHE indicates that the file/directory should be cached for later tasks. (recommended)
-- @ref VINE_NOCACHE indicates that the file should not be cached.
-- @ref VINE_WATCH indicates that the worker will watch the output file as it is created, and incrementally return the file to the manager as the task runs (The frequency of these updates is entirely dependent upon the system load.  If the manager is busy interacting with many workers, output updates will be less frequent.)
-- @ref VINE_FAILURE_ONLY indicates the file should only be returned if the task fails.
-- @ref VINE_SUCCESS_ONLY indicates the file should only be returned if the task succeeds.
-*/
-void vine_task_add_output_file(struct vine_task *t, const char *local_name, const char *remote_name, vine_file_flags_t flags);
-
-/** Add a url as an input for a task.
-@param t A task object.
-@param url The source URL to be accessed to provide the file.
-@param remote_name The name that the file will be given in the task sandbox.  Must be a relative path name: it may not begin with a slash.
-@param flags May be zero or more @ref vine_file_flags_t logical-ored together. See @ref vine_task_add_input_file.
-*/
-void vine_task_add_input_url(struct vine_task *t, const char *url, const char *remote_name, vine_file_flags_t flags);
-
-/** Add a file produced by a mini-task.
-Attaches a task definition to produce an input file by running a Unix command.
-This mini-task will be run on demand in order to produce the desired input file.
-This is useful if an input requires some prior step such as transferring,
-renaming, or unpacking to be useful.  A mini-task should be a short-running
-activity with minimal resource consumpion.
-@param t A task object.
-@param mini_task The mini-task to attach to the parent task.
-@param remote_name The name that the file will be given in the task sandbox.  Must be a relative path name: it may not begin with a slash.
-@param flags May be zero or more @ref vine_file_flags_t logical-ored together. See @ref vine_task_add_input_file.
-*/
-void vine_task_add_input_mini_task(struct vine_task *t, struct vine_task *mini_task, const char *remote_name, vine_file_flags_t flags);
-
-/** Add an input buffer to a task.
-@param t A task object.
-@param data The data to be passed as an input file.
-@param length The length of the buffer, in bytes
-@param remote_name The name that the file will be given in the task sandbox.  Must be a relative path name: it may not begin with a slash.
-@param flags May be zero or more @ref vine_file_flags_t or'd together. See @ref vine_task_add_input_file.
-*/
-
-void vine_task_add_input_buffer(struct vine_task *t, const char *data, int length, const char *remote_name, vine_file_flags_t flags);
-
-/** Add an empty directory to a task.
-This is very occasionally needed for applications that expect
-certain directories to exist in the working directory, prior to producing output.
-This function does not transfer any data to the task, but just creates
-a directory in its working sandbox.  If you want to transfer an
-entire directory worth of data to a task, use @ref vine_task_add_input_file and simply give a directory name.
-@param t A task object.
-@param remote_name The name of the empty directory in the task sandbox.  Must be a relative path name: it may not begin with a slash.
-*/
-void vine_task_add_empty_dir( struct vine_task *t, const char *remote_name );
 
 /** Add a general file object as a input to a task.
 @param t A task object.
 @param f A file object, created by @ref vine_file_local, @ref vine_file_url, @ref vine_file_buffer, @ref vine_file_mini_task.
 @param remote_name The name of the file as it should appear in the task's sandbox.
-@param flags May be zero or more @ref vine_file_flags_t or'd together. See @ref vine_task_add_input_file.
+@param flags May be zero or more @ref vine_mount_flags_t or'd together. See @ref vine_task_add_input_file.
 */
 
-void vine_task_add_input( struct vine_task *t, struct vine_file *f, const char *remote_name, vine_file_flags_t flags );
+void vine_task_add_input( struct vine_task *t, struct vine_file *f, const char *remote_name, vine_mount_flags_t flags );
 
 /** Add a general file object as a output of a task.
 @param t A task object.
 @param f A file object, created by @ref vine_file_local or @ref vine_file_buffer.
 @param remote_name The name of the file as it will appear in the task's sandbox.
-@param flags May be zero or more @ref vine_file_flags_t or'd together. See @ref vine_task_add_input_file.
+@param flags May be zero or more @ref vine_mount_flags_t or'd together. See @ref vine_task_add_input_file.
 */
 
-void vine_task_add_output( struct vine_task *t, struct vine_file *f, const char *remote_name, vine_file_flags_t flags );
+void vine_task_add_output( struct vine_task *t, struct vine_file *f, const char *remote_name, vine_mount_flags_t flags );
 
 /** Specify the number of times this task is retried on worker errors. If less than one, the task is retried indefinitely (this the default). A task that did not succeed after the given number of retries is returned with result VINE_RESULT_MAX_RETRIES.
 @param t A task object.
@@ -544,12 +488,20 @@ const char * vine_task_get_hostname( struct vine_task *t );
 
 /** Get a performance metric of a completed task.
 @param t A task object.
-@param name The name of a performance metric:
+@param name The name of a performance metric.
 @return The metric value, or zero if an invalid name is given.
 */
 
 int64_t vine_task_get_metric( struct vine_task *t, const char *name );
 
+
+/** Get resource information (e.g., cores, memory, and disk) of a completed task.
+@param t A task object.
+@param name One of: "allocated", "requested", or "measured". For measured resources see @ref vine_enable_monitoring.
+@return The metric value, or zero if an invalid name is given.
+*/
+
+const struct rmsummary *vine_task_get_resources( struct vine_task *t, const char *name );
 
 /** When monitoring, indicates a json-encoded file that instructs the
 monitor to take a snapshot of the task resources. Snapshots appear in the JSON
@@ -600,7 +552,20 @@ For more information, consult the manual of the resource_monitor.
 @param monitor_snapshot_file A filename.
 */
 
-void vine_task_set_snapshot_file(struct vine_task *t, const char *monitor_snapshot_file);
+void vine_task_set_snapshot_file(struct vine_task *t, struct vine_file *monitor_snapshot_file);
+
+
+/** Adds an execution environment to the task. The environment file specified
+is expected to expand to a directory with a bin/run_in_env file that will
+wrap the task command (e.g. a poncho, starch file, or any other vine mini_task
+that creates such a wrapper). If specified multiple times, environments are
+nested in the order given (i.e. first added is the first applied).
+@param t A task object.
+@param f The environment file.
+*/
+
+void vine_task_add_environment(struct vine_task *t, struct vine_file *f);
+
 
 //@}
 
@@ -625,17 +590,27 @@ size_t vine_file_size( struct vine_file *f );
 /** Declare a file object from a local file
 @param m A manager object
 @param source The path of the file on the local filesystem
+@param flags Whether to never cache the file at the workers (VINE_CACHE_NEVER,
+the default), to cache it only for the current manager (VINE_CACHE), or to
+cache it for the lifetime of the worker (VINE_CACHE_ALWAYS). Cache flags can be
+or'ed (|) with VINE_PEER_NOSHARE if the file should not be transferred among
+workers when peer transfers are enabled (@ref vine_enable_peer_transfers).
 @return A file object to use in @ref vine_task_add_input, and @ref vine_task_add_output
 */
-struct vine_file * vine_declare_file( struct vine_manager *m, const char *source );
+struct vine_file * vine_declare_file( struct vine_manager *m, const char *source, vine_file_flags_t flags );
 
 
 /** Declare a file object from a remote URL.
 @param m A manager object
 @param url The URL address of the object in text form.
+@param flags Whether to never cache the file at the workers (VINE_CACHE_NEVER,
+the default), to cache it only for the current manager (VINE_CACHE), or to
+cache it for the lifetime of the worker (VINE_CACHE_ALWAYS). Cache flags can be
+or'ed (|) with VINE_PEER_NOSHARE if the file should not be transferred among
+workers when peer transfers are enabled (@ref vine_enable_peer_transfers).
 @return A file object to use in @ref vine_task_add_input
 */
-struct vine_file * vine_declare_url( struct vine_manager *m, const char *url );
+struct vine_file * vine_declare_url( struct vine_manager *m, const char *url, vine_file_flags_t flags );
 
 
 /** Create a file object of a remote file accessible from an xrootd server.
@@ -644,9 +619,31 @@ struct vine_file * vine_declare_url( struct vine_manager *m, const char *url );
 @param proxy A proxy file object (e.g. from @ref vine_file_local) of a X509 proxy to use. If NULL, the
 environment variable X509_USER_PROXY and the file "$TMPDIR/$UID" are considered
 in that order. If no proxy is present, the transfer is tried without authentication.
+@param env    If not NULL, an environment file (e.g poncho or starch, see @ref vine_task_add_environment) that contains the xrootd executables. Otherwise assume xrootd is available at the worker.
+@param flags Whether to never cache the file at the workers (VINE_CACHE_NEVER,
+the default), to cache it only for the current manager (VINE_CACHE), or to
+cache it for the lifetime of the worker (VINE_CACHE_ALWAYS). Cache flags can be
+or'ed (|) with VINE_PEER_NOSHARE if the file should not be transferred among
+workers when peer transfers are enabled (@ref vine_enable_peer_transfers).
 @return A file object to use in @ref vine_task_add_input
 */
-struct vine_file * vine_declare_xrootd( struct vine_manager *m, const char *source, struct vine_file *proxy );
+struct vine_file * vine_declare_xrootd( struct vine_manager *m, const char *source, struct vine_file *proxy, struct vine_file *env, vine_file_flags_t flags );
+
+
+/** Create a file object of a remote file accessible from a chirp server.
+@param m A manager object
+@param server The chirp server address of the form "hostname[:port"]"
+@param source The name of the file in the server
+@param ticket If not NULL, a file object that provides a chirp an authentication ticket
+@param env    If not NULL, an environment file (e.g poncho or starch, see @ref vine_task_add_environment) that contains the chirp executables. Otherwise assume chirp is available at the worker.
+@param flags Whether to never cache the file at the workers (VINE_CACHE_NEVER,
+the default), to cache it only for the current manager (VINE_CACHE), or to
+cache it for the lifetime of the worker (VINE_CACHE_ALWAYS). Cache flags can be
+or'ed (|) with VINE_PEER_NOSHARE if the file should not be transferred among
+workers when peer transfers are enabled (@ref vine_enable_peer_transfers).
+@return A file object to use in @ref vine_task_add_input
+*/
+struct vine_file * vine_declare_chirp( struct vine_manager *m, const char *server, const char *source, struct vine_file *ticket, struct vine_file *env, vine_file_flags_t flags );
 
 
 /** Create a scratch file object.
@@ -663,12 +660,23 @@ struct vine_file * vine_declare_temp( struct vine_manager *m );
 @param name The abstract name of the buffer.
 @param buffer The contents of the buffer.
 @param size The length of the buffer, in bytes.
+@param flags Whether to never cache the file at the workers (VINE_CACHE_NEVER,
+the default), to cache it only for the current manager (VINE_CACHE), or to
+cache it for the lifetime of the worker (VINE_CACHE_ALWAYS). Cache flags can be
+or'ed (|) with VINE_PEER_NOSHARE if the file should not be transferred among
+workers when peer transfers are enabled (@ref vine_enable_peer_transfers).
 @return A file object to use in @ref vine_task_add_input, and @ref vine_task_add_output
 */
-struct vine_file * vine_declare_buffer( struct vine_manager *m, const char *buffer, size_t size );
+struct vine_file * vine_declare_buffer( struct vine_manager *m, const char *buffer, size_t size, vine_file_flags_t flags );
 
 
 /** Create a file object representing an empty directory.
+This is very occasionally needed for applications that expect
+certain directories to exist in the working directory, prior to producing output.
+This function does not transfer any data to the task, but just creates
+a directory in its working sandbox.  If you want to transfer an entire
+directory worth of data to a task, use @ref vine_declare_file and give a
+directory name.
 @param m A manager object
 @return A file object to use in @ref vine_task_add_input, and @ref vine_task_add_output
 */
@@ -676,42 +684,68 @@ struct vine_file * vine_declare_empty_dir( struct vine_manager *m );
 
 
 /** Create a file object produced from a mini-task
+Attaches a task definition to produce an input file by running a Unix command.
+This mini-task will be run on demand in order to produce the desired input file.
+This is useful if an input requires some prior step such as transferring,
+renaming, or unpacking to be useful.  A mini-task should be a short-running
+activity with minimal resource consumption.
 @param m A manager object
 @param mini_task The task which produces the file
+@param flags Whether to never cache the output of the mini task at the workers (VINE_CACHE_NEVER,
+the default), to cache it only for the current manager (VINE_CACHE), or to
+cache it for the lifetime of the worker (VINE_CACHE_ALWAYS). Cache flags can be
+or'ed (|) with VINE_PEER_NOSHARE if the file should not be transfered among
+workers when peer transfers are enabled (@ref vine_enable_peer_transfers).
 @return A file object to use in @ref vine_task_add_input
 */
-struct vine_file *vine_declare_mini_task( struct vine_manager *m, struct vine_task *mini_task );
+struct vine_file *vine_declare_mini_task( struct vine_manager *m, struct vine_task *mini_task, vine_file_flags_t flags);
 
 
 /** Create a file object by unpacking a tar archive.
 The archive may be compressed in any of the ways supported
 by tar, and so this function supports extensions .tar, .tar.gz, .tgz, tar.bz2, and so forth.
 @param m A manager object
+@param flags Whether to never cache the output directory of untar at the workers (VINE_CACHE_NEVER,
+the default), to cache it only for the current manager (VINE_CACHE), or to
+cache it for the lifetime of the worker (VINE_CACHE_ALWAYS). VINE_PEER_NOSHARE
+has no meaning for this declaration, as the output directory is never transferred among workers.
 @return A file object to use in @ref vine_task_add_input
 */
-struct vine_file * vine_declare_untar( struct vine_manager *m, struct vine_file *f );
+struct vine_file * vine_declare_untar( struct vine_manager *m, struct vine_file *f, vine_file_flags_t flags);
 
 
 /** Create a file object by unpacking a poncho package
 @param m A manager object
 @param f A file object corresponding to poncho or conda-pack tarball
+@param flags Whether to never cache the expanded poncho environment at the workers (VINE_CACHE_NEVER,
+the default), to cache it only for the current manager (VINE_CACHE), or to
+cache it for the lifetime of the worker (VINE_CACHE_ALWAYS). VINE_PEER_NOSHARE
+has no meaning for this declaration, as the expanded environment is never
+transferred among workers.
+@return A file object to use in @ref vine_task_add_input
 */
-struct vine_file * vine_declare_poncho( struct vine_manager *m, struct vine_file *f );
+struct vine_file * vine_declare_poncho( struct vine_manager *m, struct vine_file *f, vine_file_flags_t flags );
 
 
 /** Create a file object by unpacking a starch package.
 @param m A manager object
 @param f A file object representing a sfx archive.
+@param flags Whether to never cache the expanded starch archive at the workers (VINE_CACHE_NEVER,
+the default), to cache it only for the current manager (VINE_CACHE), or to
+cache it for the lifetime of the worker (VINE_CACHE_ALWAYS). VINE_PEER_NOSHARE
+has no meaning for this declaration, as the expanded starch archive is never
+transferred among workers.
 @return A file object to use in @ref vine_task_add_input
 */
-struct vine_file * vine_declare_starch( struct vine_manager *m, struct vine_file *f );
+struct vine_file * vine_declare_starch( struct vine_manager *m, struct vine_file *f, vine_file_flags_t flags );
 
 
-/** Delete a file object
+/** Request to remove a file
+Decrement the reference count and delete if zero.
 @param m A manager object
 @param f A file object
 */
-void vine_declare_delete( struct vine_manager *m, struct vine_file *f );
+void vine_remove_file( struct vine_manager *m, struct vine_file *f );
 
 
 //@}
@@ -765,17 +799,17 @@ Once returned, it is safe to re-submit the same take object via @ref vine_submit
 */
 int vine_submit(struct vine_manager *m, struct vine_task *t);
 
-/** Indicate the duty to be installed on all workers connected to the manager.
-The duty is expected to run on all workers until they disconnect from the manager.
+/** Indicate the library to be installed on all workers connected to the manager.
+The library is expected to run on all workers until they disconnect from the manager.
 @param t A task object.
-@param name The duty to be installed
+@param name The library to be installed
 */
-void vine_manager_install_duty( struct vine_manager *q, struct vine_task *t, const char *name );
+void vine_manager_install_library( struct vine_manager *q, struct vine_task *t, const char *name );
 
-/** Indicate the duty to be removed from all connected workers
-@param name The duty to be removed
+/** Indicate the library to be removed from all connected workers
+@param name The library to be removed
 */
-void vine_manager_remove_duty( struct vine_manager *q, const char *name );
+void vine_manager_remove_library( struct vine_manager *q, const char *name );
 
 /** Wait for a task to complete.
 This call will block until either a task has completed, the timeout has expired, or the manager is empty.
@@ -854,31 +888,16 @@ void vine_set_name(struct vine_manager *m, const char *name);
 */
 const char *vine_get_name(struct vine_manager *m);
 
-/** Enables resource monitoring on the give manager.
-It generates a resource summary per task, which is written to the given
-directory. It also creates all_summaries-PID.log, that consolidates all
-summaries into a single. If monitor_output_dirname is NULL, vine_task is
-updated with the resources measured, and no summary file is kept unless
-explicitely given by vine_task's monitor_output_file.
+/** Enables resource monitoring for tasks. The resources measured are available
+in the resources_measured member of the respective vine_task.
 @param m A manager object
-@param monitor_output_directory The name of the output directory. If NULL,
-summaries are kept only when monitor_output_directory is set per task, but
-resources_measured from vine_task is updated.  @return 1 on success, 0 if
-@param watchdog if not 0, kill tasks that exhaust declared resources.
-@return 1 on success, o if monitoring was not enabled.
+@param watchdog If not 0, kill tasks that exhaust declared resources.
+@param time_series If not 0, generate a time series of resources per task in
+VINE_RUNTIME_INFO_DIR/vine-logs/time-series/ (WARNING: for long running tasks these
+files may reach gigabyte sizes. This function is mostly used for debugging.)
+@return 1 on success, 0 if monitoring could not be enabled.
 */
-int vine_enable_monitoring(struct vine_manager *m, char *monitor_output_directory, int watchdog);
-
-/** Enables resource monitoring on the give manager.
-As @ref vine_enable_monitoring, but it generates a time series and a
-monitor debug file (WARNING: for long running tasks these files may reach
-gigabyte sizes. This function is mostly used for debugging.)
-@param m A manager object.
-@param monitor_output_directory The name of the output directory.
-@param watchdog if not 0, kill tasks that exhaust declared resources.
-@return 1 on success, 0 if monitoring was not enabled.
-*/
-int vine_enable_monitoring_full(struct vine_manager *m, char *monitor_output_directory, int watchdog);
+int vine_enable_monitoring(struct vine_manager *m, int watchdog, int time_series);
 
 /** Enable taskvine peer transfers to be scheduled by the manager **/
 int vine_enable_peer_transfers(struct vine_manager *m);
@@ -1128,6 +1147,7 @@ void vine_set_manager_preferred_connection(struct vine_manager *m, const char *p
  - "keepalive-interval" Set the minimum number of seconds to wait before sending new keepalive checks to workers. (default=300)
  - "keepalive-timeout" Set the minimum number of seconds to wait for a keepalive response from worker before marking it as dead. (default=30)
  - "short-timeout" Set the minimum timeout when sending a brief message to a single worker. (default=5s)
+ - "monitor-interval" Maximum number of seconds between resource monitor measurements. If less than 1, use default (5s). (default=5)
  - "category-steady-n-tasks" Set the number of tasks considered when computing category buckets.
  - "hungry-minimum" Mimimum number of tasks to consider manager not hungry. (default=10)
  - "wait-for-workers" Mimimum number of workers to connect before starting dispatching tasks. (default=0)
